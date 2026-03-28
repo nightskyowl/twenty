@@ -1,132 +1,182 @@
 ---
-description: Check for upstream Twenty CRM updates, merge safely, and report what changed
+description: One-click upstream sync — merges twentyhq/twenty updates, protects our files, pushes, and reports what changed
 ---
 
-You are syncing this fork (nightskyowl/twenty) with the upstream repo (twentyhq/twenty).
+You are syncing this fork (nightskyowl/twenty) with upstream (twentyhq/twenty).
 This project is HQ-CRM — a vertical CRM for Vietnamese industrial real estate built on Twenty.
 
-IMPORTANT: Our customized files must NEVER be overwritten. Read `.gitattributes` to see which files are protected with `merge=ours`.
+IMPORTANT: This workflow is FULLY AUTONOMOUS. Do NOT pause for approval, do NOT ask the user questions mid-process, do NOT show intermediate results. Run everything silently and only speak to the user ONCE at the very end with a summary.
 
-## Step 1: Check current state
+IMPORTANT: Our customized files must NEVER be overwritten. `.gitattributes` protects them with `merge=ours`.
 
-Make sure the working tree is clean before doing anything.
+## Step 1: Pre-flight checks
 
 ```bash
-git status --porcelain
+# Ensure clean working tree
+if [ -n "$(git status --porcelain)" ]; then
+  echo "DIRTY"
+else
+  echo "CLEAN"
+fi
 ```
+// turbo
 
-If there are uncommitted changes, STOP and tell the user to commit or stash first.
+If DIRTY, tell the user: "Working tree has uncommitted changes. Please commit or stash first, then re-run /sync-upstream." and STOP. Do not continue.
 
-## Step 2: Fetch upstream and check for updates
+If CLEAN, continue silently.
+
+## Step 2: Fetch and check for updates
 
 ```bash
+# Ensure upstream remote exists
+git remote get-url upstream &>/dev/null || git remote add upstream https://github.com/twentyhq/twenty.git
+
+# Fetch upstream
 git fetch upstream
+
+# Count new commits
+BEHIND=$(git rev-list --count HEAD..upstream/main)
+echo "BEHIND=$BEHIND"
 ```
 // turbo
 
-Then compare our branch with upstream:
+If BEHIND=0, tell the user: "Already up to date with upstream. No changes to merge." and STOP.
+
+If BEHIND>0, continue silently. Save the count for the final report.
+
+## Step 3: Capture pre-merge state for reporting
 
 ```bash
-git log --oneline main..upstream/main | head -30
+# Save commit count
+echo "=== NEW COMMITS ==="
+git log --oneline HEAD..upstream/main
+
+echo ""
+echo "=== PACKAGES CHANGED ==="
+git diff --stat HEAD..upstream/main -- packages/twenty-front packages/twenty-server packages/twenty-shared packages/twenty-ui packages/twenty-emails 2>/dev/null
+
+echo ""
+echo "=== NOTABLE AREAS ==="
+git diff --name-only HEAD..upstream/main | grep -cE "^packages/twenty-server/src/database" || echo "0"
+echo " migration files"
+
+git diff --name-only HEAD..upstream/main | grep -cE "^packages/twenty-front/" || echo "0"
+echo " frontend files"
+
+git diff --name-only HEAD..upstream/main | grep -cE "^packages/twenty-server/" || echo "0"
+echo " server files"
 ```
+// turbo
 
-If there are no new commits, tell the user "Already up to date" and stop.
+Save this output for the final report. Do NOT show it to the user yet. Continue silently.
 
-Otherwise, show the user how many new commits there are and a summary of what areas changed:
-
-```bash
-git diff --stat main..upstream/main
-```
-
-## Step 3: Analyze the update before merging
-
-Before merging, check if any upstream changes touch files we care about:
+## Step 4: Merge upstream
 
 ```bash
-git diff --name-only main..upstream/main | grep -E "^(CLAUDE\.md|AGENTS\.md|\.agent/|\.cursor/|\.vscode/|\.gitattributes|\.mcp\.json|scripts/)" || echo "No conflicts with our custom files"
-```
-
-Also check what packages were updated:
-
-```bash
-git diff --stat main..upstream/main -- packages/twenty-front packages/twenty-server packages/twenty-shared packages/twenty-ui
-```
-
-Report your findings to the user:
-- How many commits behind we are
-- Which packages have changes (twenty-front, twenty-server, twenty-shared, etc.)
-- Whether any upstream changes touch our protected files (and that they will be auto-excluded)
-- Any notable changes (new features, breaking changes, migrations) based on commit messages
-
-## Step 4: Merge upstream safely
-
-Configure the ours merge driver and run the merge:
-
-```bash
+# Configure ours merge driver (makes .gitattributes merge=ours work)
 git config merge.ours.driver true
-```
-// turbo
 
-```bash
+# Merge
 git merge upstream/main --no-edit
 ```
+// turbo
 
-If the merge has conflicts:
-1. Check if conflicts are in our protected files — resolve those by keeping ours: `git checkout --ours <file> && git add <file>`
-2. Check if conflicts are in deleted files (.cursor/, .vscode/) — resolve by removing: `git rm <file>`
-3. For any other conflicts, list them clearly and ask the user how to resolve
+If the merge succeeds cleanly, continue to Step 5.
 
-## Step 5: Clean up unwanted files
-
-After merge, remove any files that should not exist in our fork:
+If there are conflicts, resolve them automatically:
 
 ```bash
-if [ -d ".cursor" ]; then git rm -rf .cursor && echo "Removed .cursor/"; fi
-if [ -d ".vscode" ]; then git rm -rf .vscode && echo "Removed .vscode/"; fi
-```
+# Auto-resolve: files we own → keep ours
+for f in CLAUDE.md AGENTS.md .gitattributes .mcp.json; do
+  if git diff --name-only --diff-filter=U | grep -q "^${f}$"; then
+    git checkout --ours "$f" && git add "$f"
+  fi
+done
 
-If cleanup removed files, commit:
+# Auto-resolve: .agent/ directory → keep ours
+git diff --name-only --diff-filter=U | grep "^\.agent/" | while read -r f; do
+  git checkout --ours "$f" && git add "$f"
+done
+
+# Auto-resolve: directories we deleted → remove
+for dir in .cursor .vscode; do
+  git diff --name-only --diff-filter=U | grep "^${dir}/" | while read -r f; do
+    git rm -f "$f" 2>/dev/null || true
+  done
+done
+
+# Check for remaining conflicts
+REMAINING=$(git diff --name-only --diff-filter=U 2>/dev/null)
+if [ -n "$REMAINING" ]; then
+  echo "UNRESOLVED"
+  echo "$REMAINING"
+else
+  echo "ALL_RESOLVED"
+  git commit --no-edit 2>/dev/null || true
+fi
+```
+// turbo
+
+If UNRESOLVED: tell the user which files have conflicts and STOP. Do not push.
+If ALL_RESOLVED: continue silently.
+
+## Step 5: Post-merge cleanup
 
 ```bash
-git diff --cached --quiet || git commit -m "chore(hq): clean up unwanted upstream files after merge"
+# Remove directories that should not exist in our fork
+CHANGED=false
+for dir in .cursor .vscode; do
+  if [ -d "$dir" ]; then
+    git rm -rf "$dir" 2>/dev/null || true
+    CHANGED=true
+  fi
+done
+
+if [ "$CHANGED" = true ] && ! git diff --cached --quiet; then
+  git commit -m "chore(hq): clean up unwanted upstream files after merge"
+fi
+
+echo "CLEANUP_DONE"
 ```
+// turbo
 
-## Step 6: Verify our custom files are intact
-
-Confirm none of our files were overwritten:
+## Step 6: Verify protected files
 
 ```bash
-echo "=== Checking CLAUDE.md ===" && head -5 CLAUDE.md
-echo "=== Checking AGENTS.md ===" && head -5 AGENTS.md
-echo "=== Checking .agent/rules/ ===" && ls .agent/rules/
-echo "=== Checking .mcp.json ===" && head -3 .mcp.json
-echo "=== Checking scripts/ ===" && ls scripts/
+echo "=== CLAUDE.md ===" && head -1 CLAUDE.md
+echo "=== AGENTS.md ===" && head -1 AGENTS.md
+echo "=== .agent/rules/ ===" && ls .agent/rules/
+echo "=== .gitattributes ===" && head -1 .gitattributes
+echo "=== .mcp.json ===" && head -1 .mcp.json
 ```
+// turbo
 
-## Step 7: Check for new migrations
+If any file is missing or shows upstream content instead of ours, STOP and alert the user. Otherwise continue silently.
+
+## Step 7: Push to origin
 
 ```bash
-git diff --name-only main@{1}..HEAD -- "packages/twenty-server/src/database" | head -20
+git push origin main
+```
+// turbo
+
+## Step 8: Final report
+
+Now — and ONLY now — speak to the user. Provide a single, clear summary:
+
+```
+✅ Upstream sync complete
+
+Commits merged: [number]
+Packages updated: [list which ones changed and rough scope]
+Notable changes: [new features, bug fixes, breaking changes, dependency bumps — based on commit messages]
+New migrations: [yes/no — if yes, remind user to run: npx nx database:reset twenty-server]
+Protected files: All intact (CLAUDE.md, AGENTS.md, .agent/, .gitattributes, .mcp.json)
+Cleaned up: [.cursor/.vscode removed, or "nothing to clean"]
+Pushed to: origin/main ✓
+
+If dependency changes were included, run: yarn install
+If new migrations exist, run: npx nx database:reset twenty-server
 ```
 
-If new migrations exist, tell the user they may need to run:
-```
-npx nx database:reset twenty-server
-```
-
-## Step 8: Report to the user
-
-Provide a clear summary:
-
-1. **Commits merged:** how many
-2. **Packages updated:** which ones and rough scope of changes
-3. **Notable changes:** new features, breaking changes, new migrations, dependency updates
-4. **How this improves our project:** what we get for free from upstream (bug fixes, new CRM features, performance improvements, etc.)
-5. **Excluded/protected:** list any upstream changes to our custom files that were correctly ignored
-6. **Action needed:** whether the user needs to run migrations, install dependencies (`yarn install`), or rebuild
-
-End with:
-```
-Review the merge with: git log --oneline -10
-Push when ready: git push origin main
-```
+Do NOT add any other commentary. Do NOT ask follow-up questions. The sync is done.
