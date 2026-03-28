@@ -1,3 +1,19 @@
+# ============================================================
+# HQ-CRM Fork: Always keep our version on upstream merge
+# Uses the "ours" merge driver (configured by merge-upstream.sh)
+# ============================================================
+CLAUDE.md merge=ours
+AGENTS.md merge=ours
+.agent/** merge=ours
+.gitattributes merge=ours
+.mcp.json merge=ours
+
+# Files we deleted — auto-resolve as "keep deleted" on merge
+.cursor/** merge=ours
+.vscode/** merge=ours
+
+# ============================================================
+
 * text=auto eol=lf
 
 *.ts text eol=lf
